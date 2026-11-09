@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "钉钉个人 Source",
+    "description": "把你的钉钉个人身份接入 dsh-superagent：复用本机 dws CLI 已登录账号，接收被 @、单聊与白名单群的消息，回复以你本人身份发出（默认带 AI 角标）。支持多账号（corpId:userId）、按账号开关单聊，缺原消息 ID 时引用回复自动回退直发，并带历史回读与媒体下载。使用前需本机安装 dws CLI 并完成登录；同一账号同时只能有一个事件消费者。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "DingTalk personal Source",
+    "description": "Your DingTalk identity as a dsh-superagent source: the logged-in dws CLI account receives @-mentions, DMs and whitelisted groups; replies go out as you, AI badge on. Multi-account, quoted replies with direct-send fallback, history reads and media downloads. Needs dws CLI signed in locally; one consumer per account.",
+    "detail": "docs/DETAIL.md"
+  }
+}

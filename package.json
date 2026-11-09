@@ -1,0 +1,70 @@
+{
+  "name": "dsh-superagent-dws",
+  "description": "Personal-identity DingTalk Source for dsh-superagent: the dws CLI (DingTalk Workspace CLI) personal event stream feeds the engine pipeline; replies go out as the logged-in user via `dws chat message send`.",
+  "version": "0.2.0",
+  "license": "MIT",
+  "author": "Shuai-S",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./client": "./lib/client.js"
+  },
+  "icon": "icon.svg",
+  "files": [
+    "lib",
+    "locale",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "docs"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "tsdown && node scripts/build-client.mjs",
+    "typecheck": "tsc --noEmit",
+    "check": "pnpm typecheck && pnpm build",
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "prepare": "pnpm build"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "manifestVersion": 1,
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
+    },
+    "compatibility": {
+      "dsh": "0.2.2-rc.1",
+      "dshReleases": {
+        "0.2.2-rc.1": "compatible"
+      }
+    }
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.4",
+    "@types/node": "^22.20.0",
+    "tsdown": "^0.4.0",
+    "typescript": "^5.7.0"
+  }
+}
