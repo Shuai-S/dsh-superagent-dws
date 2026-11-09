@@ -22,7 +22,7 @@ import type { DwsConfig, EffectiveAccount } from './dws-kind.ts'
 import { activeBinary, idOf } from './dws-kind.ts'
 import { sendDwsMessage } from './dws-cli.ts'
 import { sameOrigin, type WebServerLike } from './panel.ts'
-import { findTarget, touchTarget, type DeliverTarget } from './targets.ts'
+import { findTarget, readTargets, removeTarget, TARGET_ID_RE, touchTarget, upsertTarget, type DeliverTarget } from './targets.ts'
 import { logSendFailure } from './failure-log.ts'
 import { buildHealthPayload, countIn } from './health.ts'
 import type { HealthHolder } from './dws-kind.ts'
@@ -230,6 +230,41 @@ async function handleApi(path: string, req: IncomingMessage, res: ServerResponse
     const holder = deps.holder()
     const payload = await buildHealthPayload(holder ? holder.accounts.map((a) => idOf(a)) : [], deps.stateDir)
     respondJson(res, 200, { ok: true, ...payload })
+    return
+  }
+  if (path === '/api/targets' && req.method === 'GET') {
+    const file = await readTargets(deps.stateDir)
+    respondJson(res, 200, { ok: true, targets: file.targets })
+    return
+  }
+  if (path === '/api/targets' && req.method === 'PUT') {
+    // 契约 §1 P-C'：upsert 单目标（targetId 语法校验；createdAt 由 upsert 保留）。
+    const raw = await readBody(req)
+    let parsed: Record<string, unknown>
+    try { parsed = JSON.parse(raw) as Record<string, unknown> } catch {
+      respondJson(res, 400, { error: 'bad-request', detail: 'body is not JSON' })
+      return
+    }
+    const id = typeof parsed.id === 'string' ? parsed.id : ''
+    if (!TARGET_ID_RE.test(id)) {
+      respondJson(res, 400, { error: 'bad-request', detail: 'targetId must match ' + TARGET_ID_RE.source })
+      return
+    }
+    if (!parsed.address || typeof parsed.address !== 'object' || Array.isArray(parsed.address)) {
+      respondJson(res, 400, { error: 'bad-request', detail: 'address object required' })
+      return
+    }
+    const address: Record<string, string> = {}
+    for (const [key, value] of Object.entries(parsed.address as Record<string, unknown>)) address[key] = String(value)
+    const label = typeof parsed.label === 'string' ? parsed.label : ''
+    const { created } = await upsertTarget({ id, address, label }, deps.stateDir)
+    respondJson(res, 200, { ok: true, created })
+    return
+  }
+  if (path.startsWith('/api/targets/') && req.method === 'DELETE') {
+    const id = decodeURIComponent(path.slice('/api/targets/'.length))
+    const removed = await removeTarget(id, deps.stateDir)
+    respondJson(res, removed ? 200 : 404, removed ? { ok: true } : { error: 'unknown-target' })
     return
   }
   if (path === '/api/settings' && req.method === 'GET') {

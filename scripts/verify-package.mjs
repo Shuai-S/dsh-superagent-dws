@@ -52,6 +52,8 @@ const CLIENT_PROBES = [
   { label: 'sidebar slot', patterns: ['sidebar.panellist'] },
   { label: 'locale namespace', patterns: ['dshSuperagentDws'] },
   { label: 'panel api base', patterns: ['/dws/api'] },
+  { label: 'sources shell page id', patterns: ['dsh-superagent-sources-settings'] },
+  { label: 'sources tab slot', patterns: ['dsh.sources.settings.tabs'] },
 ]
 if (pkg.exports && pkg.exports['./client']) {
   const clientPath = join(root, 'lib/client.js')

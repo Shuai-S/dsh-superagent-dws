@@ -101,3 +101,18 @@ export async function touchTarget(id: string, baseDir?: string): Promise<void> {
     await writeAtomic(path, JSON.stringify({ version: TARGETS_VERSION, targets: file.targets }))
   })
 }
+
+/** 删除单目标；返回是否确有删除（不存在为 false）。 */
+export async function removeTarget(id: string, baseDir?: string): Promise<boolean> {
+  if (!id) return false
+  const path = targetsFile(baseDir)
+  let removed = false
+  await serialize(path, async () => {
+    const file = await readTargetsUnsafe(path)
+    const next = file.targets.filter((t) => t.id !== id)
+    if (next.length === file.targets.length) return
+    removed = true
+    await writeAtomic(path, JSON.stringify({ version: TARGETS_VERSION, targets: next }))
+  })
+  return removed
+}

@@ -29,6 +29,11 @@ interface ComponentLike {
 
 /** react 从宿主 ModuleLoader 的模块表 require（baseline external）。 */
 const React = require('react') as ReactLike
+// 「源设置」共享页壳（canonical vendored 副本）与 dws tab 内容
+import { installSourcesSettingsPage } from './shell/shell.ts'
+import { DwsSourcesTab } from './shell/tab.ts'
+/** 本包版本（「关于」tab 更新检查用；发版时与 package.json 同步改）。 */
+const LOCAL_VERSION = '0.2.0'
 
 const NS = 'dshSuperagentDws'
 const PANEL_ID = 'dsh-superagent-dws'
@@ -291,4 +296,15 @@ export function apply(ctx: ClientContextLike): void {
     { name: 'sidebar.panellist', id: PANEL_ID, order: 11, label: () => t('panel'), locale: NS },
     DwsIcon,
   )), 'dsh-superagent-dws: sidebar entry')
+  // 「源设置」共享页壳（契约 §4）：贡献 dws tab + 竞争注册页面（S1 throw 即退为贡献方）。
+  ctx.effect(() => installSourcesSettingsPage(ctx, {
+    kind: 'dws',
+    order: 60,
+    label: '钉钉(dws)',
+    apiBase: '/dsh-dws/api',
+    packageName: 'dsh-superagent-dws',
+    localVersion: LOCAL_VERSION,
+    React,
+    renderTab: () => React.createElement(DwsSourcesTab, null),
+  }), 'dsh-superagent-dws: sources settings shell')
 }
