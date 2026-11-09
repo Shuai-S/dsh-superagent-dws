@@ -34,16 +34,30 @@ export function apply(ctx: Context): void {
     })
     return async () => { controller.abort(); await running }
   })
-  // 面板「钉钉登录」页：设备流登录会话 + 静默安装状态（M2/M3）。
+  // 面板「钉钉登录」页：设备流登录会话 + 静默安装状态（M2/M3）；
+  // 同一 register 调用面追加契约路由 /dsh-dws/api（deliver/deliver-test/health/settings）。
   const sessions = new LoginSessionManager()
   const webServer = (ctx as unknown as { webServer?: WebServerLike }).webServer
   if (webServer) {
     ctx.effect(() => registerPanelRoutes(webServer, {
       configBinary: () => channelConfig.current?.config.dwsBinary ?? 'dws',
+      receive: (trigger) => orchestrator.context(dwsKind).receive(trigger),
+      holder: () => channelConfig.current,
     }, sessions), 'dws: panel routes')
   }
 }
-export { dwsKind, DwsConfigSchema, HEALTH_ENTRY } from './dws-kind.ts'
+export { dwsKind, DwsConfigSchema, AclPolicySchema, HEALTH_ENTRY } from './dws-kind.ts'
+// ACL 访问模式（契约 §3，vendored tools/acl/acl.ts）
+export { evaluateAcl, aclDenyNoticeText } from './acl.ts'
+export type { AclPolicy, AclInput, AclVerdict, AclDenyText } from './acl.ts'
+// 主动投递目标表与契约路由（契约 §1/§2，/dsh-dws/api）
+export { readTargets, findTarget, upsertTarget, touchTarget, targetsFile, TARGET_ID_RE, TARGETS_VERSION } from './targets.ts'
+export type { DeliverTarget, TargetsFile } from './targets.ts'
+export { registerContractRoutes, createApiHandler, SETTINGS_FIELDS, TEST_DELIVERY_TEXT, DELIVER_ACTOR_ID } from './deliver.ts'
+// 健康计数（契约 §1/§5：in/out/fail/deny + dedup 水位）
+export { countIn, countOut, countFail, countDeny, snapshotCounters, resetCounters, noteHealth, denySuffix, buildHealthPayload, withHealthCapture } from './health.ts'
+export { seenCount } from './dedup.ts'
+export { aclInputFor } from './stream.ts'
 // 面板登录会话（依赖可注入，纯状态转移可测）
 export { LoginSessionManager } from './login-session.ts'
 // NDJSON 信封解析纯函数（stream 内联最小导出，供单测）

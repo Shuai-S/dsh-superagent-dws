@@ -43,11 +43,28 @@ if (existsSync(indexPath)) {
   check(kind.length > 0 && lib.includes(kind), 'lib/index.js 缺少 kind 名探针: ' + kind)
 }
 
-// 3. ./client export → lib/client.js 存在且非空
+// 3. ./client export → lib/client.js 存在且非空 + 注册标识探针（契约 5.4 固化）
+//    探针清单是数组，P-C' 页壳落地后往里加条目即可扩展。
+//    双匹配防引号风格：每个探针的裸子串 / 单引号 / 双引号任一命中即通过——
+//    tsc 编译产物引号风格可能随源码写法变化，裸子串兜底拼接场景。
+const CLIENT_PROBES = [
+  { label: 'panel id', patterns: ['dsh-superagent-dws'] },
+  { label: 'sidebar slot', patterns: ['sidebar.panellist'] },
+  { label: 'locale namespace', patterns: ['dshSuperagentDws'] },
+  { label: 'panel api base', patterns: ['/dws/api'] },
+]
 if (pkg.exports && pkg.exports['./client']) {
   const clientPath = join(root, 'lib/client.js')
   const ok = existsSync(clientPath) && statSync(clientPath).size > 0
   check(ok, './client export 已声明但 lib/client.js 缺失或为空')
+  if (ok) {
+    const client = readFileSync(clientPath, 'utf8')
+    for (const probe of CLIENT_PROBES) {
+      const hit = probe.patterns.some((p) =>
+        client.includes(p) || client.includes("'" + p + "'") || client.includes('"' + p + '"'))
+      check(hit, 'lib/client.js 缺少 client 探针 [' + probe.label + ']: ' + probe.patterns.join(' | '))
+    }
+  }
 }
 
 // 4. cordis.patch.yml - id: 与包名一致

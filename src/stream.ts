@@ -10,10 +10,12 @@ import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { SourceContextLike, TriggerLike } from './types.ts'
-import { HEALTH_ENTRY, channelConfig, resolveAccounts, type DwsConfig, type EffectiveAccount } from './dws-kind.ts'
-import { listProfiles, resolveSelfIds, type DwsProfileInfo } from './dws-cli.ts'
+import { HEALTH_ENTRY, activeBinary, channelConfig, idOf, resolveAccounts, type DwsConfig, type EffectiveAccount } from './dws-kind.ts'
+import { listProfiles, resolveSelfIds, sendDwsMessage, type DwsProfileInfo } from './dws-cli.ts'
 import { binaryState, ensureInstalled, installState } from './install.ts'
 import { seenHas, seenOrAdd } from './dedup.ts'
+import { aclDenyNoticeText, evaluateAcl, type AclInput } from './acl.ts'
+import { countDeny, countIn, denySuffix, withHealthCapture } from './health.ts'
 
 /** The three IM keys carried by every account process: all parameterless, so
  *  they share one consume call (P0 dry-run accepted subscription[0..2]); user-
@@ -47,12 +49,15 @@ interface AccountState {
 }
 
 export async function watch(source: SourceContextLike, signal: AbortSignal): Promise<void> {
+  // 健康旁路捕获（/dsh-dws/api/health 用）：dwsStream 的每次 report 同步进
+  // health.ts 的 noteHealth，报告语义与目标不变（withHealthCapture 纯委托转发）。
+  const captured = withHealthCapture(source, HEALTH_ENTRY)
   const runners = new Map<string, { key: string; stop: () => void; done: Promise<void> }>()
   let profileCache: { at: number; profiles: DwsProfileInfo[] } = { at: 0, profiles: [] }
   while (!signal.aborted) {
     const config = source.config<DwsConfig>('dws')
     if (!config || config.accounts.length === 0) {
-      source.report(HEALTH_ENTRY, { state: 'paused', detail: 'waiting for account configuration' })
+      captured.report(HEALTH_ENTRY, { state: 'paused', detail: 'waiting for account configuration' })
       channelConfig.current = undefined
       await pause(5000, signal)
       continue
@@ -61,7 +66,7 @@ export async function watch(source: SourceContextLike, signal: AbortSignal): Pro
     const binary = await ensureInstalled(config.dwsBinary)
     if (!binary) {
       const st = installState()
-      source.report(HEALTH_ENTRY, st.phase === 'installing'
+      captured.report(HEALTH_ENTRY, st.phase === 'installing'
         ? { state: 'starting', detail: 'dws CLI 未安装，正在静默安装（源 ' + (st.registry ?? '') + '，第 ' + st.attempt + '/' + st.total + ' 次）…' }
         : { state: 'error', detail: 'dws CLI 未安装且自动安装失败：' + (st.error ?? 'unknown') + '；可手动 npm i -g dingtalk-workspace-cli' })
       channelConfig.current = undefined
@@ -75,7 +80,7 @@ export async function watch(source: SourceContextLike, signal: AbortSignal): Pro
     }
     if (profileCache.profiles.length === 0) {
       // M1：未登录不给 consume 拉起机会（省得 subscribeUser 报错退避循环）。
-      source.report(HEALTH_ENTRY, { state: 'paused', detail: 'dws 未登录：打开面板「钉钉登录」页完成设备流登录，或终端运行 dws auth login' })
+      captured.report(HEALTH_ENTRY, { state: 'paused', detail: 'dws 未登录：打开面板「钉钉登录」页完成设备流登录，或终端运行 dws auth login' })
       channelConfig.current = { config, accounts: resolveAccounts(config, ''), binary: binary.path }
       await pause(5000, signal)
       continue
@@ -96,7 +101,7 @@ export async function watch(source: SourceContextLike, signal: AbortSignal): Pro
       runners.delete(id)
       if (signal.aborted) break
       const controller = new AbortController()
-      const done = runAccount(source, controller.signal, account, config, binary.path).catch((error: unknown) => {
+      const done = runAccount(captured, controller.signal, account, config, binary.path).catch((error: unknown) => {
         console.error(`[dws] account runner ${id} crashed: ${String(error).slice(0, 240)}`)
       })
       runners.set(id, { key, stop: () => controller.abort(), done })
@@ -126,16 +131,49 @@ async function runAccount(source: SourceContextLike, signal: AbortSignal, accoun
     retry = consumerRetry(retry, Date.now() - began)
     await delay(retry, undefined, { signal }).catch(() => {})
   }
-  flushPending(source, live, state, true)
+  flushPending(source, live, config, state, true)
 }
 
-function flushPending(source: SourceContextLike, account: EffectiveAccount, state: AccountState, silent: boolean): void {
+/** ACL 判定输入（契约 §3）：actorId = 发送者 staffId（toTrigger 的 actor.id；senderStaffId
+ *  缺失时 toTrigger 回退 nick/accountId——allowUsers 精确匹配几乎必不命中 = fail-closed）；
+ *  会话类型由事件映射：单聊事件（o2o）→ 'single'，其余（@/群全量）→ 'group'。 */
+export function aclInputFor(trigger: TriggerLike): AclInput {
+  const isDm = trigger.meta.isDm === true
+  return { actorId: trigger.actor.id, conversationType: isDm ? 'single' : 'group' }
+}
+
+/** ACL 判定 + 拒绝回执（契约 docs/rpc-contract.md §3，P-A'）：派发（source.receive）之前
+ *  调用。返回 true = 放行；false = 已拒绝——deny 计数入健康、以 dws chat message send
+ *  直发 denyText 回执（kind 'notice' 语义，idempotencyKey 'acl-deny:<triggerId>'，不经
+ *  引擎），调用方跳过 receive 与 seenOrAdd（不派发不消费——崩溃重放会按当时策略重新判定，
+ *  进程内 state.seen 已在 ingest 标记，不会重复进管线）。回执失败只记日志，绝不抛进管线。 */
+async function aclGate(account: EffectiveAccount, config: DwsConfig, trigger: TriggerLike): Promise<boolean> {
+  const verdict = evaluateAcl(config.policy, aclInputFor(trigger))
+  if (verdict.allowed) return true
+  countDeny()
+  try {
+    const holder = channelConfig.current
+    const binary = activeBinary(holder)
+    const acct = holder?.accounts.find((a) => idOf(a) === String(trigger.meta.accountId ?? '')) ?? account
+    if (trigger.channel) {
+      await sendDwsMessage(binary, acct, trigger.channel.address, aclDenyNoticeText(verdict, 'zh'), 'acl-deny:' + trigger.id)
+    }
+  } catch (error) {
+    console.error(`[dws] acl deny receipt failed: ${String(error).slice(0, 200)}`)
+  }
+  return false
+}
+
+function flushPending(source: SourceContextLike, account: EffectiveAccount, config: DwsConfig, state: AccountState, silent: boolean): void {
   for (const [key, entry] of [...state.pending]) {
     clearTimeout(entry.timer)
     state.pending.delete(key)
     state.chain = state.chain
       .then(async () => {
+        // ACL（契约 §3）：派发前判定，拒绝则不派发不消费（见 aclGate 注释）。
+        if (!(await aclGate(account, config, entry.trigger))) return
         await source.receive(entry.trigger)
+        countIn() // 契约 §5：in = 去重后送达 receive 的 trigger
         await seenOrAdd(account.profile || 'default', entry.trigger.id).catch((error: unknown) => {
           console.error(`[dws] seen persist failed: ${String(error).slice(0, 240)}`)
         })
@@ -175,7 +213,10 @@ async function ingest(source: SourceContextLike, account: EffectiveAccount, conf
       state.pending.delete(trigger.id)
       state.chain = state.chain
         .then(async () => {
+          // ACL（契约 §3）：派发前判定，拒绝则不派发不消费（见 aclGate 注释）。
+          if (!(await aclGate(account, config, trigger))) return
           await source.receive(trigger)
+          countIn() // 契约 §5：in = 去重后送达 receive 的 trigger
           // 派发成功后才落盘 seen（见 ingest 注释）；写失败仅记日志，不影响主流程。
           await seenOrAdd(storeKey, trigger.id).catch((error: unknown) => {
             console.error(`[dws] seen persist failed: ${String(error).slice(0, 240)}`)
@@ -187,7 +228,7 @@ async function ingest(source: SourceContextLike, account: EffectiveAccount, conf
     }, Math.max(500, config.coalesceMs)),
   }
   state.pending.set(trigger.id, entry)
-  if (state.pending.size >= PENDING_CAP) flushPending(source, account, state, false)
+  if (state.pending.size >= PENDING_CAP) flushPending(source, account, config, state, false)
 }
 
 async function consumeOnce(source: SourceContextLike, signal: AbortSignal, account: EffectiveAccount, config: DwsConfig, state: AccountState, binary: string): Promise<void> {
@@ -216,7 +257,7 @@ async function consumeOnce(source: SourceContextLike, signal: AbortSignal, accou
       clearTimeout(timeout)
       source.report(HEALTH_ENTRY, {
         state: 'ready',
-        detail: `[${accountLabel(account)}] listening (${keys.length} keys${account.selfIds.length > 0 ? '' : '; self-identity unresolved'})`,
+        detail: `[${accountLabel(account)}] listening (${keys.length} keys${account.selfIds.length > 0 ? '' : '; self-identity unresolved'})` + denySuffix(),
         at: new Date().toISOString(),
       })
     } else if (/SYSTEM_ERROR|ECONNRESET|failed/i.test(line)) {

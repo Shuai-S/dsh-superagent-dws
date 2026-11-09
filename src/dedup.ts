@@ -61,6 +61,13 @@ export async function seenHas(storeKey: string, id: string, baseDir?: string): P
   return await serialize(path, async () => (await readSeen(path)).includes(id))
 }
 
+/** 水位（/health 路由用，契约 §1「dedup 水位」）：指定 store 的 seen 条数与上限。 */
+export async function seenCount(storeKey: string, baseDir?: string): Promise<{ count: number; cap: number }> {
+  if (!storeKey) return { count: 0, cap: SEEN_CAP }
+  const path = seenFile(storeKey, baseDir)
+  return await serialize(path, async () => ({ count: (await readSeen(path)).length, cap: SEEN_CAP }))
+}
+
 /** 查询并标记：返回 true 表示首次登记（派发成功后调用）。空 id 不落盘。 */
 export async function seenOrAdd(storeKey: string, id: string, baseDir?: string): Promise<boolean> {
   if (!id) return false

@@ -8,6 +8,8 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { Localized, OutboundMessageLike, SourceKindLike, TriggerLike } from './types.ts'
+import type { AclPolicy } from './acl.ts'
+import { countOut, countFail } from './health.ts'
 import { downloadMedia, listChats, listMessages, sendDwsMessage, shanghaiTime } from './dws-cli.ts'
 import { logSendFailure } from './failure-log.ts'
 
@@ -30,12 +32,25 @@ export const GroupRowSchema = z.object({
   name: z.string().default(''),
 }).strict()
 
+/** ACL policy 的 zod 形状（契约 docs/rpc-contract.md §3；与 vendored src/acl.ts 的
+ *  AclPolicy 接口同构）。dws 可靠区分群/单聊（事件键），groupOnly 参与判定。 */
+export const AclPolicySchema = z.object({
+  mode: z.enum(['allowlist', 'open']),
+  allowUsers: z.array(z.string()),
+  groupOnly: z.boolean().optional(),
+  denyText: z.object({ zh: z.string(), en: z.string() }).optional(),
+}).strict()
+
 export const DwsConfigSchema = z.object({
   dwsBinary: z.string().default('dws'),
   coalesceMs: z.number().int().min(500).max(15000).default(2000),
   readPageSize: z.number().int().min(1).max(50).default(20),
   accounts: z.array(AccountRowSchema).default([]),
   groups: z.array(GroupRowSchema).default([]),
+  /** ACL 访问模式（契约 §3，P-A'）：不设 = 全放行（向后兼容）。mode=allowlist 时按
+   *  Trigger actor.id（senderStaffId）精确串匹配 allowUsers（大小写敏感）。
+   *  注意与 dwsKind.policy（引擎面板准入行）是两套面：本字段是插件侧派发前 ACL。 */
+  policy: AclPolicySchema.optional(),
 }).strict()
   .refine((cfg) => cfg.accounts.filter((a) => !a.profile.trim()).length <= 1, 'At most one account may leave profile empty (current login)')
   .refine((cfg) => cfg.groups.every((g) => !g.account.trim() || cfg.accounts.some((a) => a.profile.trim() === g.account.trim())), 'Group account must match a configured account profile')
@@ -76,9 +91,12 @@ export function resolveAccounts(config: DwsConfig, currentProfile: string): Effe
   }))
 }
 
+/** channelConfig 持有器形状（deliver.ts /health 路由复用）。 */
+export type HealthHolder = { config: DwsConfig; accounts: EffectiveAccount[]; binary?: string }
+
 // channel.send reads config through this holder; watch() refreshes it every round.
 // binary = watcher-resolved executable (silent-install aware); overrides config.dwsBinary.
-export const channelConfig: { current?: { config: DwsConfig; accounts: EffectiveAccount[]; binary?: string } } = {}
+export const channelConfig: { current?: HealthHolder } = {}
 
 /** The effective dws binary for host-side CLI calls. */
 export const activeBinary = (holder: { config: DwsConfig; binary?: string } | undefined): string =>
@@ -180,8 +198,10 @@ export const dwsKind: DwsKindLike = {
         const account = holder.accounts.find((a) => idOf(a) === String(address.account ?? ''))
         if (!account) throw new Error('dws: account not active: ' + String(address.account ?? ''))
         await sendDwsMessage(activeBinary(holder), account, address, message.text, message.id)
+        countOut() // 契约 §5：out = 整条发送成功
         return 'sent'
       } catch (error) {
+        countFail() // 契约 §5：fail = 发送失败
         // 失败日志（failure-log.ts）：先记 JSONL 再原样 throw，引擎照常退避重试，日志只做旁证。
         // channelKey = 账号 + 会话（均非凭据）；写失败不影响主流程。
         const address = (message?.channel?.address ?? {}) as Record<string, string>
